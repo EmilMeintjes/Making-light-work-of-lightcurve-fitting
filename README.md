@@ -7,11 +7,17 @@ The pipeline is laid out as follows:
 
 lightcurve_fitter/
 ├── models.py       — fit functions + prior builder (no dependencies beyond numpy)
+
 ├── persistence.py  — JSON region store + .npy MCMC results
+
 ├── selector.py     — Stage 1 interactive region picker
+
 ├── initialiser.py  — Stage 2 slider-based parameter initialisation
+
 ├── fitter.py       — Stage 3 PyAutoFit/emcee wrapper
+
 ├── plots.py        — Stage 4 overview, fit, and corner plots
+
 └── main.py         — CLI entry point wiring all stages together
 
 The pipeline allows you to manually select the exact region which you want to fit some function to. It saves these regions into a JSON file for future reference. Here you can specify the type of function you want to fit (currently available functions are: Gaussian, Rising exponential, Decaying exponential, and Crystal Ball function). 
