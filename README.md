@@ -1,4 +1,4 @@
-# Making-light-work-on-lightcurve-fitting
+# Making-light-work-of-lightcurve-fitting
 This is a user-friendly Python pipeline that can be used to fit some astronomical light curves.
 
 The idea is that you, as the user, retain the most control over the fitting procedure to lightcurve without the need to write the code yourself. 
