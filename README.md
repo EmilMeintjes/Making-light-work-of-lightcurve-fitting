@@ -47,23 +47,44 @@ If, instead, you want to only run the stages individually:
 
 `python3 -path/to/main.py --stage plot` for plotting 
 
-I also allow you to specify futher parameter:
+To specify the data you are fitting to, add the following argument:
+
+  `--data    "/path/to/data"`                 Path to data file (optional override of the DATA section), needs to be a string.
+
+To specify a specific directory you want to save your work to, use:
+  `--results "path/to/results"`                Path to results directory, needs to be a string.
+
+Note that if not specified, a subdirectory labelled 'results' will be created in the current working directory
+
+Similar for the final plots:
+
+  `--plots   "path/to/plots"`                 Path to plots output directory, needs to be a string.
+
+You can set the scale of the axes you are working with using:
+
+  `--xscale='log'`                             Set x-axis to log scale
+  
+  `--xscale='linear'`                          Set x-axis to linear scale
+
+  `--yscale='log'`                             Set y-axis to log scale
+  
+  `--yscale='linear'`                          Set y-axis to linear scale
+
+You can specify a specific region to re-initialise/fit/plt by using:
 
   `--ids     [int ...]`                        Restrict initialise/fit to these IDs.
   
-  `--data    str`                              Path to data file (optional override of the DATA section).
-  
-  `--regions str`                              Path to specific regions JSON file.
-  
-  `--results str`                              Path to results directory.
-  
-  `--plots   str`                              Path to plots output directory.
+  `--regions "path/to/JSON"`                   Path to specific regions JSON file, needs to be a string.
+
+And then for some miscellaneous arguments:
   
   `--walkers int`                              emcee walkers  (default 60).
   
   `--steps   int`                              emcee steps    (default 1500).
   
   `--burn    int`                              Burn-in steps  (default 300).
+
+  
 
 
 
