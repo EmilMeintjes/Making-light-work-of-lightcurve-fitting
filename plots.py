@@ -1,33 +1,50 @@
 """
-selector.py
------------
-Stage 1: Interactive region selector for nova-like lightcurve fitting.
-
-Controls
+plots.py
 --------
-Left-click (x2)  : set region START then END (order sorted automatically).
-Enter / button   : confirm the pending region and write to JSON.
-u                : undo the most recently confirmed region.
-d                : delete by ID (prompts in terminal).
-Escape           : cancel the current in-progress selection.
-q                : save all regions and close.
-Zoom / Pan tools : toolbar modes work normally; selector ignores those clicks.
+Publication-quality output plots for the nova-like lightcurve fitter.
+
+Three plot types
+----------------
+1. Overview plot  (plot_overview)
+   The full lightcurve with every fitted model overplotted in its region
+   colour.  Median model + 1-sigma (16/84 percentile) shaded band.
+
+2. Per-region fit plot  (plot_region_fit)
+   Data within the region, median model, and 16/84 shaded band.  Parameter
+   summary printed as a legend.
+
+3. Corner plot  (plot_corner)
+   Posterior distributions for all parameters of one region, using the
+   `corner` package.
+
+All functions accept an optional `save_path` argument.  If given, the figure
+is saved there instead of (or as well as) being displayed.
+
+Dependencies
+------------
+    pip install corner
 """
 
 # Sytem imports
-#import sys
-
-#External imports
-import matplotlib.pyplot as plt
-import matplotlib.widgets as mwidgets
+import os
 import numpy as np
+import matplotlib.pyplot as plt
+#import matplotlib.ticker as mticker
 
-#Local imports
-from fitting_models import MODEL_KEYS, MODEL_LABELS
-from persistence import RegionStore
+# External imports, check for corner, flags its
+try:
+    import corner as corner_pkg
+    _HAS_CORNER = True
+except ImportError:
+    _HAS_CORNER = False
+
+# Local imports
+from fitting_models import MODELS, evaluate
+from persistence import RegionStore, load_mcmc_results
+
 
 # ---------------------------------------------------------------------------
-# Colours
+# Colour map: one colour per model type (matches selector.py)
 # ---------------------------------------------------------------------------
 
 _MODEL_COLOURS = {
@@ -36,41 +53,99 @@ _MODEL_COLOURS = {
     'decaying_exp': 'tomato',
     'crystal_ball': 'mediumpurple',
 }
-_PENDING_COLOUR = 'orange'
+_ALPHA_BAND  = 0.25
+_ALPHA_SHADE = 0.12
+_LW_MEDIAN   = 2.0
+_N_DRAW      = 300   # number of posterior draws used to build the shaded band
 
 
 # ---------------------------------------------------------------------------
-# Main selector
+# Internal helpers
 # ---------------------------------------------------------------------------
 
-def run_selector(t, flux, uncertainty=None,
-                 regions_file='regions.json',
-                 xlabel='Time', ylabel='Flux',
-                 xscale='linear', yscale='linear',
-                 title=None):
+def _posterior_band(model_key, t_fine, samples, param_names, n_draw=_N_DRAW):
 
     """
-    Display the lightcurve and let the user interactively define fit regions.
+    Draw *n_draw* random posterior samples and evaluate the model at each.
+
+    Returns
+    -------
+    median : np.ndarray   Median model at each point in t_fine.
+    lo     : np.ndarray   16th percentile.
+    hi     : np.ndarray   84th percentile.
+    """
+
+    rng     = np.random.default_rng()
+    idx     = rng.choice(len(samples),
+                         size=min(n_draw, len(samples)),
+                         replace=False)
+    draws   = samples[idx]                     # (n_draw, n_params)
+    curves  = np.empty((len(idx), len(t_fine)))
+
+    for j, row in enumerate(draws):
+        params = {p: row[i] for i, p in enumerate(param_names)}
+        try:
+            curves[j] = evaluate(model_key, t_fine, params)
+        except Exception:
+            curves[j] = np.nan
+
+    median = np.nanpercentile(curves, 50, axis=0)
+    lo     = np.nanpercentile(curves, 16, axis=0)
+    hi     = np.nanpercentile(curves, 84, axis=0)
+    return median, lo, hi
+
+
+def _param_label(name, stats):
+
+    """
+    Format a parameter summary string for legend / annotation.
+    """
+
+    s = stats[name]
+    return (f"{name} = "
+            f"{s['median']:.4g}"
+            f" +{s['err_hi']:.3g}"
+            f" / -{s['err_lo']:.3g}")
+
+
+def _save_or_show(fig, save_path, show):
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"[plots] Saved -> {save_path}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# 1. Overview plot
+# ---------------------------------------------------------------------------
+
+def plot_overview(t, flux, uncertainty=None,
+                  regions_file='regions.json',
+                  results_dir='results',
+                  xlabel='Time', ylabel='Flux',
+                  title='Lightcurve overview',
+                  save_path=None, show=True):
+
+    """
+    Plot the full lightcurve with all fitted models overplotted.
+
+    For regions that have MCMC results, the median model and 16/84 band are
+    shown.  For regions that only have initial guesses (not yet fitted), the
+    guess curve is shown as a dashed line.
 
     Parameters
     ----------
-    t, flux      : array-like
-    uncertainty  : array-like or None
-    regions_file : str    Path to the JSON file (created if absent).
-    xlabel       : str    Time-axis label.
-    ylabel       : str    Flux-axis label.
-    xscale       : str    'linear' or 'log'.  Stored in the JSON file so all
-                          downstream modules pick it up automatically.
-    yscale       : str    'linear' or 'log'.  Same.
-    title        : str or None
-
-    Notes on scale
-    --------------
-    If the JSON file already exists and contains scale metadata, the stored
-    values take precedence over the xscale/yscale arguments here.  This means
-    re-opening an existing session always restores the original choice.
-    To change the scale of an existing session, edit the JSON metadata block
-    or call store.set_scales() before running.
+    t, flux       : array-like   Full lightcurve.
+    uncertainty   : array-like or None
+    regions_file  : str
+    results_dir   : str
+    xlabel, ylabel, title : str
+    save_path     : str or None   If given, save to this path.
+    show          : bool          Whether to call plt.show().
     """
 
     t    = np.asarray(t,    dtype=float)
@@ -78,342 +153,301 @@ def run_selector(t, flux, uncertainty=None,
     if uncertainty is not None:
         uncertainty = np.asarray(uncertainty, dtype=float)
 
-    # --- Load (or create) the region store ---
-    store = RegionStore(regions_file, xscale=xscale, yscale=yscale)
-    store.load()   # stored scales override constructor args if file exists
-    regions = store.regions   # live reference — mutations are reflected in store
+    store = RegionStore(regions_file)
+    store.load()
 
-    # ------------------------------------------------------------------
-    # Shared mutable state
-    # ------------------------------------------------------------------
-    state = {
-        'clicks':  [],
-        'vlines':  [],
-        'patch':   None,
-        'pending': None,
-    }
+    fig, ax = plt.subplots(figsize=(16, 5))
 
-    # ------------------------------------------------------------------
-    # Figure layout
-    # ------------------------------------------------------------------
-    fig = plt.figure(figsize=(16, 7))
-    ax  = fig.add_axes([0.07, 0.30, 0.88, 0.62])
+    # --- Raw data ---
+    if uncertainty is not None:
+        ax.errorbar(t, flux, yerr=uncertainty,
+                    fmt='o', ms=3, alpha=0.5,
+                    color='steelblue', ecolor='lightgrey', elinewidth=0.8,
+                    label='Data', zorder=2)
+    else:
+        ax.plot(t, flux, 'o', ms=3, alpha=0.5, color='steelblue',
+                label='Data', zorder=2)
 
-    # Model radio buttons
-    ax_radio = fig.add_axes([0.07, 0.05, 0.18, 0.20])
-    ax_radio.set_title('Model', fontsize=9, pad=3)
-    radio = mwidgets.RadioButtons(ax_radio, MODEL_LABELS, activecolor='steelblue')
+    # --- Per-region models ---
+    for region in store:
+        sid       = region['segment_id']
+        model_key = region['model']
+        colour    = _MODEL_COLOURS.get(model_key, 'grey')
+        label     = f"#{sid} {MODELS[model_key]['label']}"
 
-    for label in radio.labels:
-        label.set_fontsize(9)
+        # Shade the selected region
+        ax.axvspan(region['start'], region['end'],
+                   alpha=_ALPHA_SHADE, color=colour, zorder=1)
 
-    if hasattr(radio, "circles"):
-        for circle in radio.circles:
-            circle.set_radius(0.06)
+        t_fine = np.linspace(region['start'], region['end'], 500)
 
-    # Notes text box
-    ax_notes_label = fig.add_axes([0.28, 0.18, 0.50, 0.04])
-    ax_notes_label.axis('off')
-    ax_notes_label.text(0.0, 0.5, 'Notes for this region:',
-                        va='center', fontsize=9)
-    ax_notes  = fig.add_axes([0.28, 0.10, 0.50, 0.07])
-    notes_box = mwidgets.TextBox(ax_notes, '', initial='')
+        # Try to load MCMC results
+        try:
+            res         = load_mcmc_results(results_dir, sid)
+            samples     = res['samples']
+            param_names = res['param_names']
+            median, lo, hi = _posterior_band(model_key, t_fine,
+                                             samples, param_names)
+            ax.plot(t_fine, median, color=colour, lw=_LW_MEDIAN,
+                    label=label, zorder=4)
+            ax.fill_between(t_fine, lo, hi,
+                            color=colour, alpha=_ALPHA_BAND, zorder=3)
 
-    # Confirm button
-    ax_confirm  = fig.add_axes([0.80, 0.10, 0.10, 0.07])
-    btn_confirm = mwidgets.Button(ax_confirm, 'Confirm\n(Enter)',
-                                  color='lightgreen', hovercolor='mediumseagreen')
+        except FileNotFoundError:
+            # No MCMC yet — fall back to initial guess curve if available
+            guesses = region.get('initial_guesses', {})
+            if guesses:
+                param_names = MODELS[model_key]['params']
+                params      = [guesses.get(p, 0.0) for p in param_names]
+                try:
+                    y_guess = evaluate(model_key, t_fine, params)
+                    ax.plot(t_fine, y_guess, color=colour, lw=1.2,
+                            ls='--', alpha=0.7,
+                            label=f"{label} (guess)", zorder=3)
+                except Exception:
+                    pass
 
-    # Status text
-    status_txt = ax.text(
-        0.01, 0.97, 'Left-click: set START',
-        transform=ax.transAxes, va='top', fontsize=9,
-        bbox=dict(boxstyle='round', fc='wheat', alpha=0.85), zorder=10,
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xscale(store.xscale)
+    ax.set_yscale(store.yscale)
+    ax.legend(fontsize=8, loc='upper right')
+    fig.tight_layout()
+
+    _save_or_show(fig, save_path, show)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 2. Per-region fit plot
+# ---------------------------------------------------------------------------
+
+def plot_region_fit(t, flux, uncertainty=None,
+                    segment_id=None,
+                    regions_file='regions.json',
+                    results_dir='results',
+                    xlabel='Time', ylabel='Flux',
+                    save_path=None, show=True):
+
+    """
+    Plot the data and posterior fit for a single region.
+
+    Shows:
+      - Data within the region (with error bars if available)
+      - Median model (solid line)
+      - 16/84 percentile band (shaded)
+      - Parameter summary in the legend
+
+    Parameters
+    ----------
+    segment_id : int   The region to plot.  Required.
+    """
+
+    if segment_id is None:
+        raise ValueError("segment_id must be specified.")
+
+    t    = np.asarray(t,    dtype=float)
+    flux = np.asarray(flux, dtype=float)
+    if uncertainty is not None:
+        uncertainty = np.asarray(uncertainty, dtype=float)
+
+    store = RegionStore(regions_file)
+    store.load()
+    region = store.get(segment_id)
+    xscale = store.xscale
+    yscale = store.yscale
+
+    # Load MCMC results
+    res         = load_mcmc_results(results_dir, segment_id)
+    samples     = res['samples']
+    param_names = res['param_names']
+    summary     = res['summary']
+    model_key   = region['model']
+    colour      = _MODEL_COLOURS.get(model_key, 'grey')
+
+    # Clip data to region; shift time to region-relative coords for display.
+    # Fitted parameters involving time are in these same shifted coordinates.
+    t_ref  = region['start']
+    mask   = (t >= region['start']) & (t <= region['end'])
+    t_r    = t[mask] - t_ref   # region-relative
+    f_r    = flux[mask]
+    u_r    = uncertainty[mask] if uncertainty is not None else None
+
+    t_fine          = np.linspace(t_r.min(), t_r.max(), 500)
+    median, lo, hi  = _posterior_band(model_key, t_fine, samples, param_names)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    if u_r is not None:
+        ax.errorbar(t_r, f_r, yerr=u_r,
+                    fmt='o', ms=4, alpha=0.7,
+                    color='steelblue', ecolor='lightgrey', elinewidth=0.8,
+                    label='Data', zorder=2)
+    else:
+        ax.plot(t_r, f_r, 'o', ms=4, alpha=0.7,
+                color='steelblue', label='Data', zorder=2)
+
+    ax.plot(t_fine, median, color=colour, lw=_LW_MEDIAN,
+            label='Median model', zorder=4)
+    ax.fill_between(t_fine, lo, hi,
+                    color=colour, alpha=_ALPHA_BAND,
+                    label='16/84 percentile', zorder=3)
+
+    # Parameter summary in the legend via invisible proxy lines
+    for pname in param_names:
+        lbl = _param_label(pname, summary['statistics'])
+        ax.plot([], [], ' ', label=lbl)
+
+    ax.set_xlabel(xlabel + f' (relative to {t_ref:.6g})')
+    ax.set_ylabel(ylabel)
+    ax.set_title(
+        f"Seg #{segment_id}  [{MODELS[model_key]['label']}]  "
+        f"note: \"{region.get('note', '')}\""
+    )
+    ax.set_xscale(xscale)
+    ax.set_yscale(yscale)
+    ax.legend(fontsize=8, loc='upper right')
+    fig.tight_layout()
+
+    _save_or_show(fig, save_path, show)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 3. Corner plot
+# ---------------------------------------------------------------------------
+
+def plot_corner(segment_id,
+                results_dir='results',
+                regions_file='regions.json',
+                save_path=None, show=True):
+
+    """
+    Corner plot of the posterior distribution for *segment_id*.
+
+    Requires the `corner` package (pip install corner).
+    Vertical lines mark the 16th, 50th, and 84th percentiles on each 1-D
+    histogram.
+    """
+
+    if not _HAS_CORNER:
+        raise ImportError(
+            "The `corner` package is required for corner plots.  "
+            "Install it with:  pip install corner"
+        )
+
+    res         = load_mcmc_results(results_dir, segment_id)
+    samples     = res['samples']
+    param_names = res['param_names']
+    summary     = res['summary']
+
+    # Build labels with units/values
+    labels = []
+    for pname in param_names:
+        s   = summary['statistics'][pname]
+        lbl = (f"{pname}\n"
+               f"{s['median']:.4g} +{s['err_hi']:.3g}/-{s['err_lo']:.3g}")
+        labels.append(lbl)
+
+    # Percentile values for each parameter (for the quantile lines)
+    quantiles_vals = [0.16, 0.50, 0.84]
+
+    fig = corner_pkg.corner(
+        samples,
+        labels=labels,
+        quantiles=quantiles_vals,
+        show_titles=True,
+        title_fmt='.4g',
+        title_kwargs={'fontsize': 9},
+        label_kwargs={'fontsize': 9},
+        color='steelblue',
+        hist_kwargs={'color': 'steelblue', 'alpha': 0.7},
     )
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    fig.suptitle(
+        f"Posterior — Seg #{segment_id}  "
+        f"[{summary.get('metadata', {}).get('model', '')}]  "
+        f"({summary['n_draws']} draws)",
+        fontsize=10, y=1.01,
+    )
 
-    def _apply_scales():
-        ax.set_xscale(store.xscale)
-        ax.set_yscale(store.yscale)
+    _save_or_show(fig, save_path, show)
+    return fig
 
-    def _draw_data():
-        if uncertainty is not None:
-            ax.errorbar(t, flux, yerr=uncertainty,
-                        fmt='o', ms=3, alpha=0.6,
-                        color='steelblue', ecolor='lightgrey', elinewidth=0.8,
-                        zorder=2)
-        else:
-            ax.plot(t, flux, 'o', ms=3, alpha=0.6, color='steelblue', zorder=2)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.set_title(
-            title or (
-                'Nova-like lightcurve  |  '
-                'Click: START->END  |  Enter: confirm  |  '
-                'u: undo  |  d: delete by ID  |  Esc: cancel  |  q: quit'
-            ),
-            fontsize=9,
-        )
-        _apply_scales()
 
-    def _shade_confirmed():
-        for r in regions:
-            colour = _MODEL_COLOURS.get(r['model'], 'grey')
-            ax.axvspan(r['start'], r['end'], alpha=0.20, color=colour, zorder=1)
-            mid = 0.5 * (r['start'] + r['end'])
-            ax.text(mid, ax.get_ylim()[1], f"#{r['segment_id']}",
-                    ha='center', va='top', fontsize=7, color='dimgrey', zorder=5)
+# ---------------------------------------------------------------------------
+# Convenience: generate all output plots for every fitted region
+# ---------------------------------------------------------------------------
 
-    def _full_redraw():
-        nonlocal status_txt
-        ax.cla()
-        _draw_data()
-        _shade_confirmed()
-        status_txt = ax.text(
-            0.01, 0.97,
-            f'{len(regions)} region(s) saved  |  Click to set START',
-            transform=ax.transAxes, va='top', fontsize=9,
-            bbox=dict(boxstyle='round', fc='wheat', alpha=0.85), zorder=10,
-        )
-        fig.canvas.draw_idle()
+def plot_all(t, flux, uncertainty=None,
+             regions_file='regions.json',
+             results_dir='results',
+             output_dir='plots',
+             xlabel='Time', ylabel='Flux',
+             show=False):
 
-    def _clear_in_progress():
-        for vl in state['vlines']:
-            try:
-                vl.remove()
-            except Exception:
-                pass
-        state['vlines'] = []
-        if state['patch'] is not None:
-            try:
-                state['patch'].remove()
-            except Exception:
-                pass
-            state['patch'] = None
-        state['clicks']  = []
-        state['pending'] = None
-        fig.canvas.draw_idle()
+    """
+    Generate and save all plots for every fitted region:
+      - One overview PNG
+      - One fit PNG per region
+      - One corner PNG per region
 
-    def _update_status(msg):
-        status_txt.set_text(msg)
-        fig.canvas.draw_idle()
+    Parameters
+    ----------
+    output_dir : str    Directory in which to write the PNG files.
+    show       : bool   Whether to display each figure interactively as well
+                        as saving it.  Default False (save only).
+    """
 
-    def _selected_model_key():
-        return MODEL_KEYS[MODEL_LABELS.index(radio.value_selected)]
+    os.makedirs(output_dir, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Confirm region
-    # ------------------------------------------------------------------
+    store = RegionStore(regions_file)
+    store.load()
 
-    def _confirm_region(_event=None):
-        if state['pending'] is None:
-            _update_status('Nothing to confirm — click START then END first.')
-            return
+    # --- Overview ---
+    overview_path = os.path.join(output_dir, 'overview.png')
+    plot_overview(
+        t, flux, uncertainty,
+        regions_file=regions_file,
+        results_dir=results_dir,
+        xlabel=xlabel, ylabel=ylabel,
+        save_path=overview_path, show=show,
+    )
 
-        model_key = _selected_model_key()
-        note      = notes_box.text.strip()
-        seg_id    = store.next_id()
+    # --- Per-region ---
+    for region in store:
+        sid = region['segment_id']
 
-        region = {
-            'segment_id':      seg_id,
-            'start':           state['pending']['start'],
-            'end':             state['pending']['end'],
-            'model':           model_key,
-            'note':            note,
-            'initial_guesses': {},
-            'curvefit_result': None,
-            'priors':          {},
-        }
-        store.add(region)   # validates, fills defaults, saves JSON
+        # Check results exist before trying to plot
+        stem         = os.path.join(os.path.abspath(results_dir),
+                                    f'seg{sid:04d}')
+        summary_path = stem + '_summary.json'
+        if not os.path.exists(summary_path):
+            print(f"[plots] No results for seg #{sid} — skipping fit/corner.")
+            continue
 
-        # Commit shading
-        colour = _MODEL_COLOURS.get(model_key, 'grey')
-        if state['patch'] is not None:
-            try:
-                state['patch'].remove()
-            except Exception:
-                pass
-            state['patch'] = None
-        ax.axvspan(region['start'], region['end'], alpha=0.20, color=colour, zorder=1)
-        mid = 0.5 * (region['start'] + region['end'])
-        ax.text(mid, ax.get_ylim()[1], f"#{seg_id}",
-                ha='center', va='top', fontsize=7, color='dimgrey', zorder=5)
+        fit_path    = os.path.join(output_dir, f'seg{sid:04d}_fit.png')
+        corner_path = os.path.join(output_dir, f'seg{sid:04d}_corner.png')
 
-        for vl in state['vlines']:
-            try:
-                vl.remove()
-            except Exception:
-                pass
-        state['vlines'] = []
-        state['clicks']  = []
-        state['pending'] = None
-        notes_box.set_val('')
-
-        _update_status(
-            f'Saved #{seg_id} [{model_key}]  |  '
-            f'{len(regions)} total  |  Click to set next START'
-        )
-
-    btn_confirm.on_clicked(_confirm_region)
-
-    # ------------------------------------------------------------------
-    # Mouse click
-    # ------------------------------------------------------------------
-
-    def on_click(event):
-        if event.inaxes is not ax or event.button != 1:
-            return
-        if fig.canvas.toolbar is not None and fig.canvas.toolbar.mode != '':
-            return
-        x = event.xdata
-        if x is None:
-            return
-
-        state['clicks'].append(x)
-
-        if len(state['clicks']) == 1:
-            vl = ax.axvline(x, color='green', ls='--', lw=1.2, zorder=4)
-            state['vlines'].append(vl)
-            _update_status(f'START = {x:.6g}  |  Now click END')
-
-        elif len(state['clicks']) == 2:
-            start, end = sorted(state['clicks'])
-            for vl in state['vlines']:
-                try:
-                    vl.remove()
-                except Exception:
-                    pass
-            state['vlines'] = [
-                ax.axvline(start, color='green', ls='--', lw=1.2, zorder=4),
-                ax.axvline(end,   color='red',   ls='--', lw=1.2, zorder=4),
-            ]
-            if state['patch'] is not None:
-                try:
-                    state['patch'].remove()
-                except Exception:
-                    pass
-            state['patch']   = ax.axvspan(start, end, alpha=0.30,
-                                          color=_PENDING_COLOUR, zorder=1)
-            state['pending'] = {'start': start, 'end': end}
-            _update_status(
-                f'[{start:.6g} -> {end:.6g}]  |  '
-                'Add a note if desired, then press Enter or Confirm'
+        try:
+            plot_region_fit(
+                t, flux, uncertainty,
+                segment_id=sid,
+                regions_file=regions_file,
+                results_dir=results_dir,
+                xlabel=xlabel, ylabel=ylabel,
+                save_path=fit_path, show=show,
             )
+        except Exception as exc:
+            print(f"[plots] Fit plot for seg #{sid} failed: {exc}")
 
-        elif len(state['clicks']) > 2:
-            _clear_in_progress()
-            _update_status('Selection reset — click to set START again')
-
-        fig.canvas.draw_idle()
-
-    # ------------------------------------------------------------------
-    # Key press
-    # ------------------------------------------------------------------
-
-    def on_key(event):
-        key = event.key
-
-        if key == 'enter':
-            _confirm_region()
-
-        elif key == 'escape':
-            _clear_in_progress()
-            _update_status('Cancelled  |  Click to set START')
-
-        elif key == 'u':
-            _clear_in_progress()
-            removed = store.undo_last()
-            if removed is not None:
-                _full_redraw()
-                _update_status(
-                    f'Undone #{removed["segment_id"]}  |  '
-                    f'{len(regions)} remaining  |  Click to set START'
-                )
-            else:
-                _update_status('Nothing to undo  |  Click to set START')
-
-        elif key == 'd':
-            _clear_in_progress()
-            if not regions:
-                _update_status('No regions to delete')
-                return
-            print(f"\nDelete by ID.  Existing IDs: {store.ids()}")
-            try:
-                target = int(input("Enter segment ID to delete (or 0 to cancel): "))
-            except (ValueError, EOFError):
-                _update_status('Delete cancelled')
-                return
-            if target == 0:
-                _update_status('Delete cancelled')
-                return
-            try:
-                store.remove(target)
-                _full_redraw()
-                _update_status(
-                    f'Deleted #{target}  |  '
-                    f'{len(regions)} remaining  |  Click to set START'
-                )
-            except KeyError:
-                _update_status(f'ID #{target} not found  |  Click to set START')
-
-        elif key == 'q':
-            _clear_in_progress()
-            store.save()
-            print(f"\nSaved {len(regions)} region(s) to '{regions_file}'")
-            print(f"  xscale={store.xscale}  yscale={store.yscale}")
-            for r in regions:
-                print(
-                    f"  #{r['segment_id']:3d}  "
-                    f"{r['start']:.6g} -> {r['end']:.6g}  "
-                    f"[{r['model']}]  \"{r['note']}\""
-                )
-            plt.close(fig)
-
-    # ------------------------------------------------------------------
-    # Initial draw
-    # ------------------------------------------------------------------
-
-    _draw_data()
-    _shade_confirmed()
-    if regions:
-        _update_status(
-            f'{len(regions)} region(s) loaded  |  '
-            f'xscale={store.xscale}  yscale={store.yscale}  |  '
-            'Click to set START'
-        )
-
-    fig.canvas.mpl_connect('button_press_event', on_click)
-    fig.canvas.mpl_connect('key_press_event',    on_key)
-    plt.tight_layout()
-    #plt.tight_layout(rect=[0, 0.28, 1, 1])
-    plt.show()
-
-    return store
-
-
-# ---------------------------------------------------------------------------
-# Testing
-# ---------------------------------------------------------------------------
-
-if __name__ == '__main__':
-    rng       = np.random.default_rng(42)
-    t_test    = np.linspace(0, 200, 800)
-    flux_test = (
-        0.5
-        + 3.0 * np.exp(-0.5 * ((t_test - 60)  / 8) ** 2)
-        + 2.0 * np.exp(-0.5 * ((t_test - 140) / 5) ** 2)
-        + 0.1 * rng.standard_normal(800)
-    )
-    unc_test = np.abs(0.08 + 0.02 * rng.standard_normal(800))
-
-    store = run_selector(
-        t_test, flux_test, uncertainty=unc_test,
-        regions_file='/tmp/test_regions.json',
-        xlabel='Days since discovery',
-        ylabel='Flux density (arbitrary)',
-        xscale=xscale, yscale=yscale,
-    )
-    print("\nReturned store:", store)
+        try:
+            plot_corner(
+                sid,
+                results_dir=results_dir,
+                regions_file=regions_file,
+                save_path=corner_path, show=show,
+            )
+        except Exception as exc:
+            print(f"[plots] Corner plot for seg #{sid} failed: {exc}")
