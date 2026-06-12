@@ -44,20 +44,20 @@ MODEL_LABELS = [
 # t is always region-relative (zero at region start).
 MODEL_EQUATIONS = {
     'gaussian': (
-        'f(t) = A · exp(−0.5·((t − centre) / σ)²) + y_offset'
+        r'f(t) = A · exp(−0.5·((t − centre) / $\sigma$)$^2$) + y_offset'
     ),
     'rising_exp': (
-        'f(t) = A · exp(t / τ_rise) + y_offset'
+        r'f(t) = A · exp(t / $\tau$_rise) + y_offset'
         '\n'
-        '  t = 0 at region start;  τ_rise > 0'
+        r'  t = 0 at region start;  $\tau$_rise > 0'
     ),
     'decaying_exp': (
-        'f(t) = A · exp(−t / τ_decay) + y_offset'
+        r'f(t) = A · exp(−t / $\tau$_decay) + y_offset'
         '\n'
-        '  t = 0 at region start;  τ_decay > 0'
+        r'  t = 0 at region start;  $\tau$_decay > 0'
     ),
     'crystal_ball': (
-        'f(t) = A · CB(t; centre, σ, α, n) + y_offset'
+        r'f(t) = A · CB(t; centre, $\sigma$, α, n) + y_offset'
         '\n'
         '  Gaussian core + power-law tail.  α > 0 → tail on left side.'
     ),

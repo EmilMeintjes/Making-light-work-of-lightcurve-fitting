@@ -583,7 +583,7 @@ def run_initialiser(t, flux, uncertainty=None,
             continue
 
         t_r_shifted = t_r - t_ref
-        xlabel_rel  = xlabel + ' (relative)'
+        xlabel_rel  = xlabel + ' (relative to start of region)'
 
         action = _run_one(t_r_shifted, f_r, u_r, region, store,
                           xlabel_rel, ylabel, xscale=xscale, yscale=yscale)
