@@ -6,7 +6,7 @@ Stage 3: MCMC fitting via PyAutoFit / emcee.
 For each initialised region in the RegionStore, this module:
   1. Reads the initial guesses and priors from the store
   2. Builds a PyAutoFit model with Uniform priors on every parameter
-  3. Runs emcee via PyAutoFit's DynestyStatic or Emcee search
+  3. Runs emcee via PyAutoFit's Emcee search
   4. Saves posterior samples + summary to disk via persistence.save_mcmc_results
 
 PyAutoFit wraps emcee so that the model definition, prior specification, and
@@ -32,7 +32,6 @@ import shutil
 # External imports
 import numpy as np
 
-# Check PyAutoFit is installed; will flag later
 try:
     import autofit as af
     _HAS_AUTOFIT = True
@@ -40,7 +39,7 @@ except ImportError:
     _HAS_AUTOFIT = False
 
 # Local imports
-from fitting_models import MODELS, evaluate
+from fitting_models import evaluate, param_names_for
 from persistence import RegionStore, save_mcmc_results
 
 
@@ -48,9 +47,9 @@ from persistence import RegionStore, save_mcmc_results
 # Defaults
 # ---------------------------------------------------------------------------
 
-N_WALKERS   = 60
-N_STEPS     = 1500
-N_BURN      = 300    # steps to discard as burn-in before saving
+N_WALKERS = 60
+N_STEPS   = 1500
+N_BURN    = 300    # steps to discard as burn-in before saving
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +57,6 @@ N_BURN      = 300    # steps to discard as burn-in before saving
 # ---------------------------------------------------------------------------
 
 class _ParameterSet:
-
     """
     A plain Python class whose attributes are the free parameters.
 
@@ -71,8 +69,7 @@ class _ParameterSet:
             setattr(self, k, v)
 
 
-class _Analysis(af.Analysis):
-
+class _Analysis(af.Analysis if _HAS_AUTOFIT else object):
     """
     PyAutoFit Analysis: defines the log-likelihood for a given model + dataset.
 
@@ -81,7 +78,7 @@ class _Analysis(af.Analysis):
     t          : np.ndarray   Time values for this region.
     flux       : np.ndarray   Flux values.
     uncertainty: np.ndarray or None
-    model_key  : str          Key into models.MODELS.
+    model_key  : str          Key into fitting_models (e.g. 'gaussian').
     param_names: list of str  Parameter names, in order.
     """
 
@@ -98,18 +95,16 @@ class _Analysis(af.Analysis):
 
         Some PyAutoFit versions attempt to route array operations through JAX
         when running on Apple Silicon (M-series chips).  Explicitly returning
-        numpy here forces the pure-numpy path on all platforms, regardless of
-        what PyAutoFit detects about the host hardware.
+        numpy here forces the pure-numpy path on all platforms.
         """
         return np
 
     @property
     def _use_jax(self):
-        """Explicitly disable JAX on all platforms. Ensure compatibility with M5 silicon chips +laziness hehe"""
+        """Explicitly disable JAX on all platforms."""
         return False
 
     def log_likelihood_function(self, instance):
-
         """
         Gaussian log-likelihood.
 
@@ -119,8 +114,7 @@ class _Analysis(af.Analysis):
         If not:
             ln L = -0.5 * sum( (flux - model)^2 )  [unweighted]
         """
-
-        params = [getattr(instance, p) for p in self.param_names]
+        params = {p: getattr(instance, p) for p in self.param_names}
         try:
             model_flux = evaluate(self.model_key, self.t, params)
         except Exception:
@@ -132,7 +126,6 @@ class _Analysis(af.Analysis):
         residuals = self.flux - model_flux
 
         if self.uncertainty is not None:
-            # Guard against zero or negative uncertainties
             sigma = np.where(self.uncertainty > 0,
                              self.uncertainty, 1e-10)
             log_l = -0.5 * np.sum((residuals / sigma) ** 2)
@@ -147,7 +140,6 @@ class _Analysis(af.Analysis):
 # ---------------------------------------------------------------------------
 
 def _build_af_priors(param_names, priors_dict):
-
     """
     Convert the persistence-format priors dict into PyAutoFit UniformPrior
     objects.
@@ -161,7 +153,6 @@ def _build_af_priors(param_names, priors_dict):
     -------
     af_priors : dict  {param_name: af.UniformPrior}
     """
-
     af_priors = {}
     for name in param_names:
         if name in priors_dict:
@@ -187,15 +178,13 @@ def _fit_one_region(t_r, f_r, u_r, region, results_dir,
     ----------
     force_refit : bool
         If True, delete any existing PyAutoFit output directory for this
-        segment before fitting.  This is necessary when a previous run crashed
-        and left a partial or corrupt state that causes PyAutoFit to fail on
-        resumption.
+        segment before fitting.  Necessary when a previous run crashed and
+        left a partial or corrupt state.
 
         If False (default), raise a RuntimeError if a PyAutoFit directory
         already exists so the caller can decide what to do.  This prevents
         silent deletion of a completed, good fit.
     """
-
     if not _HAS_AUTOFIT:
         raise ImportError(
             "PyAutoFit is not installed.  "
@@ -204,7 +193,7 @@ def _fit_one_region(t_r, f_r, u_r, region, results_dir,
 
     sid         = region['segment_id']
     model_key   = region['model']
-    param_names = MODELS[model_key]['params']
+    param_names = param_names_for(model_key)          # ← new API
     guesses     = region.get('initial_guesses', {})
     priors_dict = region.get('priors', {})
 
@@ -214,11 +203,6 @@ def _fit_one_region(t_r, f_r, u_r, region, results_dir,
         return None
 
     # --- Handle stale PyAutoFit output directory ---
-    # PyAutoFit writes search state (search.pkl, chain files) into paf_path.
-    # If a previous run crashed, these files can be incomplete or inconsistent,
-    # causing PyAutoFit to fail on any subsequent attempt to fit the same
-    # segment.  We detect this situation and either abort (force_refit=False)
-    # or wipe the directory (force_refit=True).
     paf_path = os.path.join(os.path.abspath(results_dir),
                             'pyautofit', f'seg{sid:04d}')
 
@@ -241,36 +225,30 @@ def _fit_one_region(t_r, f_r, u_r, region, results_dir,
 
     # --- Build PyAutoFit model ---
     af_priors = _build_af_priors(param_names, priors_dict)
-
-    # Create a model from _ParameterSet with one prior per attribute
-    model = af.Model(_ParameterSet, **af_priors)
+    model     = af.Model(_ParameterSet, **af_priors)
 
     # --- Analysis ---
     analysis = _Analysis(t_r, f_r, u_r, model_key, param_names)
 
     # --- Emcee search ---
     search = af.Emcee(
-        path_prefix  = paf_path,
-        name         = f'seg{sid:04d}',
-        nwalkers     = n_walkers,
-        nsteps       = n_steps,
+        path_prefix=paf_path,
+        name=f'seg{sid:04d}',
+        nwalkers=n_walkers,
+        nsteps=n_steps,
     )
 
     print(f"  Running emcee: {n_walkers} walkers x {n_steps} steps ...")
     result = search.fit(model=model, analysis=analysis)
 
     # --- Extract samples ---
-    # PyAutoFit stores the full chain via result.samples
-    # result.samples.parameter_lists: list of lists, shape (n_total, n_params)
     all_params = np.array(result.samples.parameter_lists)   # (n_total, n_params)
 
-    # Burn-in discard
     if n_burn > 0 and all_params.shape[0] > n_burn:
         samples = all_params[n_burn:]
     else:
         samples = all_params
 
-    # log-probabilities
     try:
         lnprob = np.array(result.samples.log_likelihood_list)[n_burn:]
     except Exception:
@@ -281,7 +259,7 @@ def _fit_one_region(t_r, f_r, u_r, region, results_dir,
         'model':     model_key,
         'start':     region['start'],
         'end':       region['end'],
-        't_ref':     region['start'],   # time offset; add to params to get abs. coords
+        't_ref':     region['start'],
         'n_walkers': n_walkers,
         'n_steps':   n_steps,
         'n_burn':    n_burn,
@@ -310,7 +288,6 @@ def run_fitter(t, flux, uncertainty=None,
                n_burn=N_BURN,
                segment_ids=None,
                force_refit=False):
-
     """
     Run MCMC fitting for all initialised regions (or a specified subset).
 
@@ -324,20 +301,17 @@ def run_fitter(t, flux, uncertainty=None,
     n_steps       : int          Number of emcee steps (default 1500).
     n_burn        : int          Burn-in steps to discard (default 300).
     segment_ids   : list of int or None
-                    If given, only fit these segments.  Useful for re-fitting
-                    a specific region without re-running all.
+                    If given, only fit these segments.
     force_refit   : bool
-                    If True, delete any stale PyAutoFit output directories
-                    before fitting.  Use this to recover from crashed runs.
+                    If True, delete stale PyAutoFit output directories before
+                    fitting.  Use to recover from crashed runs.
                     If False (default), a RuntimeError is raised if a prior
-                    PyAutoFit directory is detected, so you can decide
-                    consciously whether to overwrite it.
+                    PyAutoFit directory is detected.
 
     Returns
     -------
-    summaries : dict  {segment_id: summary_dict}   One entry per fitted region.
+    summaries : dict  {segment_id: summary_dict}
     """
-
     if not _HAS_AUTOFIT:
         raise ImportError(
             "PyAutoFit is not installed.  "
@@ -356,11 +330,10 @@ def run_fitter(t, flux, uncertainty=None,
         print("No regions found.  Run the selector first.")
         return {}
 
-    # Determine which segments to fit
     if segment_ids is not None:
         todo = [store.get(sid) for sid in segment_ids]
     else:
-        todo = [r for r in store if r.get('initial_guesses')]
+        todo    = [r for r in store if r.get('initial_guesses')]
         skipped = [r['segment_id'] for r in store
                    if not r.get('initial_guesses')]
         if skipped:
@@ -380,14 +353,13 @@ def run_fitter(t, flux, uncertainty=None,
               f"[{region['model']}]  "
               f"{region['start']:.6g} -> {region['end']:.6g} ---")
 
-        # Clip data to the region and shift time to region-relative coords.
-        # All fitted parameters involving time (centre, t_peak, etc.) are
-        # therefore in units of (time since region start), matching what the
-        # initialiser showed the user on the sliders.
-        mask   = (t >= region['start']) & (t <= region['end'])
-        t_r    = t[mask] - region['start']   # region-relative
-        f_r    = flux[mask]
-        u_r    = uncertainty[mask] if uncertainty is not None else None
+        # Clip data to region; shift to region-relative time coords.
+        # All time-related fitted parameters are in these coordinates,
+        # matching what the initialiser showed on the sliders.
+        mask = (t >= region['start']) & (t <= region['end'])
+        t_r  = t[mask] - region['start']   # region-relative
+        f_r  = flux[mask]
+        u_r  = uncertainty[mask] if uncertainty is not None else None
 
         if len(t_r) == 0:
             print(f"  WARNING: no data points inside region #{sid} — skipping.")

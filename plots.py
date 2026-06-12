@@ -25,13 +25,13 @@ Dependencies
     pip install corner
 """
 
-# Sytem imports
+# System imports
 import os
+
+# External imports
 import numpy as np
 import matplotlib.pyplot as plt
-#import matplotlib.ticker as mticker
 
-# External imports, check for corner, flags its
 try:
     import corner as corner_pkg
     _HAS_CORNER = True
@@ -39,8 +39,21 @@ except ImportError:
     _HAS_CORNER = False
 
 # Local imports
-from fitting_models import MODELS, evaluate
+from fitting_models import evaluate, param_names_for
 from persistence import RegionStore, load_mcmc_results
+
+
+# ---------------------------------------------------------------------------
+# Human-readable model labels (mirrors _KEY_TO_LABEL in initialiser.py)
+# Defined here so plots.py has no dependency on initialiser.
+# ---------------------------------------------------------------------------
+
+_KEY_TO_LABEL = {
+    'gaussian':     'Gaussian',
+    'rising_exp':   'Rising exp.',
+    'decaying_exp': 'Decaying exp.',
+    'crystal_ball': 'Crystal ball',
+}
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +77,6 @@ _N_DRAW      = 300   # number of posterior draws used to build the shaded band
 # ---------------------------------------------------------------------------
 
 def _posterior_band(model_key, t_fine, samples, param_names, n_draw=_N_DRAW):
-
     """
     Draw *n_draw* random posterior samples and evaluate the model at each.
 
@@ -74,13 +86,12 @@ def _posterior_band(model_key, t_fine, samples, param_names, n_draw=_N_DRAW):
     lo     : np.ndarray   16th percentile.
     hi     : np.ndarray   84th percentile.
     """
-
-    rng     = np.random.default_rng()
-    idx     = rng.choice(len(samples),
-                         size=min(n_draw, len(samples)),
-                         replace=False)
-    draws   = samples[idx]                     # (n_draw, n_params)
-    curves  = np.empty((len(idx), len(t_fine)))
+    rng    = np.random.default_rng()
+    idx    = rng.choice(len(samples),
+                        size=min(n_draw, len(samples)),
+                        replace=False)
+    draws  = samples[idx]                      # (n_draw, n_params)
+    curves = np.empty((len(idx), len(t_fine)))
 
     for j, row in enumerate(draws):
         params = {p: row[i] for i, p in enumerate(param_names)}
@@ -96,11 +107,7 @@ def _posterior_band(model_key, t_fine, samples, param_names, n_draw=_N_DRAW):
 
 
 def _param_label(name, stats):
-
-    """
-    Format a parameter summary string for legend / annotation.
-    """
-
+    """Format a parameter summary string for legend / annotation."""
     s = stats[name]
     return (f"{name} = "
             f"{s['median']:.4g}"
@@ -129,7 +136,6 @@ def plot_overview(t, flux, uncertainty=None,
                   xlabel='Time', ylabel='Flux',
                   title='Lightcurve overview',
                   save_path=None, show=True):
-
     """
     Plot the full lightcurve with all fitted models overplotted.
 
@@ -147,7 +153,6 @@ def plot_overview(t, flux, uncertainty=None,
     save_path     : str or None   If given, save to this path.
     show          : bool          Whether to call plt.show().
     """
-
     t    = np.asarray(t,    dtype=float)
     flux = np.asarray(flux, dtype=float)
     if uncertainty is not None:
@@ -158,7 +163,6 @@ def plot_overview(t, flux, uncertainty=None,
 
     fig, ax = plt.subplots(figsize=(16, 5))
 
-    # --- Raw data ---
     # --- Raw data ---
     if uncertainty is not None:
         ax.errorbar(t, flux, yerr=uncertainty,
@@ -173,21 +177,21 @@ def plot_overview(t, flux, uncertainty=None,
     print(f"[plots] store has {len(store.regions)} region(s): {store.ids()}")
     for region in store.regions:
         print(f"[plots] entering loop for seg #{region['segment_id']}")
-        sid = region['segment_id']
+        sid       = region['segment_id']
         model_key = region['model']
-        colour = _MODEL_COLOURS.get(model_key, 'grey')
-        label = f"#{sid} {MODELS[model_key]['label']}"
+        colour    = _MODEL_COLOURS.get(model_key, 'grey')
+        label     = f"#{sid} {_KEY_TO_LABEL.get(model_key, model_key)}"
 
         ax.axvspan(region['start'], region['end'],
                    alpha=_ALPHA_SHADE, color=colour, zorder=1)
 
         # t_fine in absolute coords for plotting; shifted for model evaluation
-        t_fine = np.linspace(region['start'], region['end'], 500)
+        t_fine         = np.linspace(region['start'], region['end'], 500)
         t_fine_shifted = t_fine - region['start']
 
         try:
-            res = load_mcmc_results(results_dir, sid)
-            samples = res['samples']
+            res         = load_mcmc_results(results_dir, sid)
+            samples     = res['samples']
             param_names = res['param_names']
             print(f"[plots] seg #{sid}: {len(samples)} samples, "
                   f"params={param_names}, "
@@ -205,8 +209,8 @@ def plot_overview(t, flux, uncertainty=None,
         except FileNotFoundError:
             guesses = region.get('initial_guesses', {})
             if guesses:
-                param_names = MODELS[model_key]['params']
-                params = {p: guesses.get(p, 0.0) for p in param_names}
+                param_names = param_names_for(model_key)
+                params      = {p: guesses.get(p, 0.0) for p in param_names}
                 try:
                     y_guess = evaluate(model_key, t_fine_shifted, params)
                     ax.plot(t_fine, y_guess, color=colour, lw=1.2,
@@ -217,7 +221,7 @@ def plot_overview(t, flux, uncertainty=None,
 
         except Exception as exc:
             print(f"[plots] seg #{sid} MCMC plot failed: {exc}")
-            import traceback;
+            import traceback
             traceback.print_exc()
 
     ax.set_xlabel(xlabel)
@@ -242,7 +246,6 @@ def plot_region_fit(t, flux, uncertainty=None,
                     results_dir='results',
                     xlabel='Time', ylabel='Flux',
                     save_path=None, show=True):
-
     """
     Plot the data and posterior fit for a single region.
 
@@ -256,7 +259,6 @@ def plot_region_fit(t, flux, uncertainty=None,
     ----------
     segment_id : int   The region to plot.  Required.
     """
-
     if segment_id is None:
         raise ValueError("segment_id must be specified.")
 
@@ -282,14 +284,14 @@ def plot_region_fit(t, flux, uncertainty=None,
 
     # Clip data to region; shift time to region-relative coords for display.
     # Fitted parameters involving time are in these same shifted coordinates.
-    t_ref  = region['start']
-    mask   = (t >= region['start']) & (t <= region['end'])
-    t_r    = t[mask] - t_ref   # region-relative
-    f_r    = flux[mask]
-    u_r    = uncertainty[mask] if uncertainty is not None else None
+    t_ref = region['start']
+    mask  = (t >= region['start']) & (t <= region['end'])
+    t_r   = t[mask] - t_ref   # region-relative
+    f_r   = flux[mask]
+    u_r   = uncertainty[mask] if uncertainty is not None else None
 
-    t_fine          = np.linspace(t_r.min(), t_r.max(), 500)
-    median, lo, hi  = _posterior_band(model_key, t_fine, samples, param_names)
+    t_fine         = np.linspace(t_r.min(), t_r.max(), 500)
+    median, lo, hi = _posterior_band(model_key, t_fine, samples, param_names)
 
     fig, ax = plt.subplots(figsize=(10, 5))
 
@@ -316,7 +318,7 @@ def plot_region_fit(t, flux, uncertainty=None,
     ax.set_xlabel(xlabel + f' (relative to {t_ref:.6g})')
     ax.set_ylabel(ylabel)
     ax.set_title(
-        f"Seg #{segment_id}  [{MODELS[model_key]['label']}]  "
+        f"Seg #{segment_id}  [{_KEY_TO_LABEL.get(model_key, model_key)}]  "
         f"note: \"{region.get('note', '')}\""
     )
     ax.set_xscale(xscale)
@@ -336,7 +338,6 @@ def plot_corner(segment_id,
                 results_dir='results',
                 regions_file='regions.json',
                 save_path=None, show=True):
-
     """
     Corner plot of the posterior distribution for *segment_id*.
 
@@ -344,7 +345,6 @@ def plot_corner(segment_id,
     Vertical lines mark the 16th, 50th, and 84th percentiles on each 1-D
     histogram.
     """
-
     if not _HAS_CORNER:
         raise ImportError(
             "The `corner` package is required for corner plots.  "
@@ -364,13 +364,10 @@ def plot_corner(segment_id,
                f"{s['median']:.4g} +{s['err_hi']:.3g}/-{s['err_lo']:.3g}")
         labels.append(lbl)
 
-    # Percentile values for each parameter (for the quantile lines)
-    quantiles_vals = [0.16, 0.50, 0.84]
-
     fig = corner_pkg.corner(
         samples,
         labels=labels,
-        quantiles=quantiles_vals,
+        quantiles=[0.16, 0.50, 0.84],
         show_titles=True,
         title_fmt='.4g',
         title_kwargs={'fontsize': 9},
@@ -379,9 +376,10 @@ def plot_corner(segment_id,
         hist_kwargs={'color': 'steelblue', 'alpha': 0.7},
     )
 
+    model_key = summary.get('metadata', {}).get('model', '')
     fig.suptitle(
         f"Posterior — Seg #{segment_id}  "
-        f"[{summary.get('metadata', {}).get('model', '')}]  "
+        f"[{_KEY_TO_LABEL.get(model_key, model_key)}]  "
         f"({summary['n_draws']} draws)",
         fontsize=10, y=1.01,
     )
@@ -400,7 +398,6 @@ def plot_all(t, flux, uncertainty=None,
              output_dir='plots',
              xlabel='Time', ylabel='Flux',
              show=False):
-
     """
     Generate and save all plots for every fitted region:
       - One overview PNG
@@ -413,7 +410,6 @@ def plot_all(t, flux, uncertainty=None,
     show       : bool   Whether to display each figure interactively as well
                         as saving it.  Default False (save only).
     """
-
     os.makedirs(output_dir, exist_ok=True)
 
     store = RegionStore(regions_file)
