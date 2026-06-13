@@ -1,6 +1,22 @@
-numpy 
-matplotlib
-scipy
-corner
-autofit
-tqdm
+# Python 3.11+ is recommended (PyAutoFit has first-class support for
+# 3.12/3.13; 3.10 works but may print deprecation warnings).
+#
+# tkinter is required by the interactive stages (selector.py,
+# initialiser.py) for dropdowns and popup dialogs. It is part of the Python
+# standard library and is NOT installed via pip:
+#   - macOS / Windows (python.org or conda installers): included already.
+#   - Linux: may need a system package, e.g. `sudo apt install python3-tk`
+#     (Debian/Ubuntu) or `sudo dnf install python3-tkinter` (Fedora).
+#
+# Versions below are lower bounds, based on a known-working environment
+# (numpy 1.26.4, scipy 1.13.1, matplotlib 3.8.4, corner 2.2.2,
+# autofit 2026.5.29.4, emcee 3.1.6, tqdm 4.66) — newer compatible versions
+# are fine.
+
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+corner>=2.2
+autofit>=2024.1.1
+emcee>=3.1
+tqdm>=4.60

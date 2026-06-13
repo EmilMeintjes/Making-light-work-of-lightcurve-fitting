@@ -1,290 +1,410 @@
 """
-fitting_models.py
------------------
-Model definitions, evaluation, and prior construction for the nova-like
-lightcurve fitting pipeline.
+models.py
+---------
+Fit functions, model registry, and prior construction for lightcurve fitting.
 
-Public API
-----------
-MODEL_KEYS     : list[str]   — canonical model key strings
-MODEL_LABELS   : list[str]   — human-readable display names (same order)
-MODEL_EQUATIONS: dict        — LaTeX-style equation string per model key
-PRIOR_FRACTION : float       — default ±fraction for uniform priors (0.30)
+Each model function has the signature:
+    f(t, *params) -> np.ndarray
+where the parameter order matches the corresponding entry in MODELS[key]['params'].
 
-evaluate(model_key, t, params)        -> np.ndarray
-build_priors(param_names, guesses, prior_fraction=PRIOR_FRACTION,
-             fix_y_offset=False)      -> dict
-build_priors_from_curvefit(param_names, popt, pcov, n_sigma=2.0,
-                           fix_y_offset=False)  -> dict
-param_names_for(model_key)            -> list[str]
+A y_offset term is included in every model so that a non-zero baseline within
+the selected region is absorbed into the fit.
 """
 
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Registry
+# Model functions
 # ---------------------------------------------------------------------------
 
-MODEL_KEYS = [
-    'gaussian',
-    'rising_exp',
-    'decaying_exp',
-    'crystal_ball',
-]
+def gaussian(t, amplitude, centre, sigma, y_offset):
 
-MODEL_LABELS = [
-    'Gaussian',
-    'Rising Exp',
-    'Decaying Exp',
-    'Crystal Ball',
-]
+    """
+    Symmetric Gaussian peak on a constant baseline.
 
-# Human-readable equation strings shown in the initialiser window.
-# Uses simple ASCII math that renders well in a matplotlib Text object.
-# t is always region-relative (zero at region start).
-MODEL_EQUATIONS = {
-    'gaussian': (
-        r'f(t) = A · exp(−0.5·((t − centre) / $\sigma$)$^2$) + y_offset'
-    ),
-    'rising_exp': (
-        r'f(t) = A · exp(t / $\tau$_rise) + y_offset'
-        '\n'
-        r'  t = 0 at region start;  $\tau$_rise > 0'
-    ),
-    'decaying_exp': (
-        r'f(t) = A · exp(−t / $\tau$_decay) + y_offset'
-        '\n'
-        r'  t = 0 at region start;  $\tau$_decay > 0'
-    ),
-    'crystal_ball': (
-        r'f(t) = A · CB(t; centre, $\sigma$, α, n) + y_offset'
-        '\n'
-        '  Gaussian core + power-law tail.  α > 0 → tail on left side.'
-    ),
+        f(t) = A * exp(-0.5 * ((t - mu) / sigma)^2) + y_offset
+
+    Parameters
+    ----------
+    amplitude : float   Peak height above baseline (should be > 0).
+    centre    : float   Peak position.
+    sigma     : float   Standard deviation; must be > 0.
+    y_offset  : float   Constant baseline level.
+    """
+
+    return amplitude * np.exp(-0.5 * ((t - centre) / sigma) ** 2) + y_offset
+
+
+def rising_exponential(t, amplitude, tau_rise, y_offset):
+
+    """
+    Exponential rise on a constant baseline.
+
+        f(t) = A * exp(t / tau_rise) + y_offset
+
+    Parameters
+    ----------
+    amplitude : float
+    tau_rise  : float
+    y_offset  : float
+    """
+
+    return amplitude * np.exp(t / tau_rise) + y_offset
+
+
+def decaying_exponential(t, amplitude, tau_decay, y_offset):
+
+    """
+    Exponential decay on a constant baseline.
+
+        f(t) = A * exp(-t / tau_decay) + y_offset
+
+    Parameters
+    ----------
+    amplitude : float
+    tau_decay : float
+    y_offset  : float
+    """
+
+    return amplitude * np.exp(-t / tau_decay) + y_offset
+
+
+def bazin(t, amplitude, t0, tau_rise, tau_fall, y_offset):
+
+    """
+    Bazin et al. (2009) transient lightcurve function: a sigmoid-modulated
+    exponential decay that smoothly rises to a peak near t0 and then falls.
+
+        f(t) = A * exp(-(t - t0) / tau_fall) / (1 + exp(-(t - t0) / tau_rise)) + y_offset
+
+    Unlike the separate rising/decaying exponentials, this is a single
+    smooth function covering the full rise-peak-fall shape with no
+    discontinuities, making it suitable for fitting an entire lightcurve
+    in one go.
+
+    Parameters
+    ----------
+    amplitude : float   Overall scale of the outburst.
+    t0        : float   Reference time near the peak.
+    tau_rise  : float   Rise timescale; must be > 0.
+    tau_fall  : float   Decay timescale; must be > 0.
+    y_offset  : float   Constant baseline level.
+    """
+
+    x = t - t0
+    return amplitude * np.exp(-x / tau_fall) / (1.0 + np.exp(-x / tau_rise)) + y_offset
+
+
+def crystal_ball(t, amplitude, centre, sigma, alpha, n, y_offset):
+
+    """
+    Crystal Ball function: Gaussian core with a power-law tail on one side.
+
+    The standard Crystal Ball is defined piecewise:
+
+        Let z = (t - centre) / sigma
+
+        f(t) = A * exp(-0.5 * z^2)          if z > -|alpha|
+             = A * (n/|alpha|)^n
+                 * exp(-0.5 * alpha^2)
+                 / (n/|alpha| - |alpha| - z)^n   otherwise
+
+    The tail is on the *left* side (low-t side) when alpha > 0, modelling a
+    sharp rise and a power-law decay — generally used in particle physics, but may be useful for astro.
+
+    To flip the tail to the right (slow rise, sharp cutoff), pass alpha < 0.
+
+    Parameters
+    ----------
+    amplitude : float   Peak height above baseline.
+    centre    : float   Peak position (mode of the Gaussian core).
+    sigma     : float   Width of the Gaussian core; must be > 0.
+    alpha     : float   Transition point from Gaussian to power law (in units
+                        of sigma). Conventionally > 0; sign sets tail side.
+    n         : float   Power-law index; must be > 1 for normalisability.
+    y_offset  : float   Constant baseline level.
+
+    Note:
+    For numerical stability, the power-law branch can overflow or go negative if
+    n/|alpha| - |alpha| - z approaches zero.  A small floor is applied to
+    the denominator to prevent division by zero without distorting the shape.
+    """
+
+    a = np.abs(alpha)
+    z = (t - centre) / sigma
+
+    # Gaussian branch
+    gauss_branch = amplitude * np.exp(-0.5 * z ** 2)
+
+    # Power-law branch pre-factor
+    # C = (n/a)^n * exp(-0.5 * a^2)
+    C = (n / a) ** n * np.exp(-0.5 * a ** 2)
+    denom = np.maximum(n / a - a - z, 1e-10)   # floor avoids division by zero
+    power_branch = amplitude * C / denom ** n
+
+    # Piecewise selection: Gaussian where z > -a, power-law elsewhere
+    result = np.where(z > -a, gauss_branch, power_branch)
+    return result + y_offset
+
+
+def gaussian_exp_wings(t, amplitude, centre, sigma, tau_rise, tau_fall, y_offset):
+
+    """
+    Gaussian core with exponential wings — a single, continuous rise-peak-fall
+    transient profile that combines an exponential rise, a Gaussian peak and an
+    exponential decay into one function with shared parameters.
+
+        Let z = (t - centre) / sigma,
+            a_L = sigma / tau_rise,   a_R = sigma / tau_fall
+
+        f(t) = A * exp(+a_L * z + 0.5 * a_L^2) + y_offset   if z < -a_L  (rise)
+             = A * exp(-0.5 * z^2)             + y_offset   if -a_L<=z<=a_R
+             = A * exp(-a_R * z + 0.5 * a_R^2) + y_offset   if z >  a_R  (fall)
+
+    Why this form
+    -------------
+    The two exponential wings are joined to the Gaussian core at z = -a_L
+    (left) and z = +a_R (right).  The join points and wing amplitudes are
+    *derived* from sigma, tau_rise and tau_fall so that both the value and the
+    first derivative are continuous there — the curve has no kinks.  tau_rise
+    and tau_fall are the e-folding timescales of the rising and falling wings
+    respectively (a larger tau => a shallower, more slowly varying wing).
+
+    Unlike fitting three separate regions, this is one model over one region:
+    the peak position, width, baseline and both wing timescales are fit
+    together, so the rise, peak and decay are guaranteed to meet seamlessly.
+
+    Parameters
+    ----------
+    amplitude : float   Peak height above baseline.
+    centre    : float   Peak position (mu).
+    sigma     : float   Gaussian core width; must be > 0.
+    tau_rise  : float   Rising-wing e-folding timescale; must be > 0.
+    tau_fall  : float   Falling-wing e-folding timescale; must be > 0.
+    y_offset  : float   Constant baseline level.
+    """
+
+    t   = np.asarray(t, dtype=float)
+    z   = (t - centre) / sigma
+    a_L = sigma / tau_rise
+    a_R = sigma / tau_fall
+
+    # All three branches are evaluated then selected; the unused branches can
+    # overflow to +inf for extreme z, which np.where simply discards — so we
+    # silence the harmless overflow warning rather than let it print.
+    with np.errstate(over='ignore', invalid='ignore'):
+        core  = np.exp(-0.5 * z ** 2)
+        left  = np.exp(a_L * z + 0.5 * a_L ** 2)
+        right = np.exp(-a_R * z + 0.5 * a_R ** 2)
+        g = np.where(z < -a_L, left, np.where(z > a_R, right, core))
+
+    return amplitude * g + y_offset
+
+
+# ---------------------------------------------------------------------------
+# Model registry
+# ---------------------------------------------------------------------------
+# Each entry maps a short string key to:
+#   'func'        : the callable above
+#   'params'      : ordered list of parameter names (matching func signature)
+#   'label'       : human-readable name for UI display
+#   'defaults'    : rough starting defaults (overridden by user sliders)
+#   'bounds_hint' : (lower_fraction, upper_fraction) relative to guess,
+#                   used by the slider initialiser as a starting range hint.
+#                   These are just UI hints; the MCMC priors are set separately.
+#   'latex'       : the model equation as a matplotlib-mathtext string (the
+#                   surrounding $...$ are included), shown beside the sliders.
+#   'symbols'     : per-parameter mathtext symbol (no $...$), in the same order
+#                   as 'params'; used to label each slider with the symbol it
+#                   corresponds to in 'latex'.
+
+MODELS = {
+    'gaussian': {
+        'func':        gaussian,
+        'params':      ['amplitude', 'centre', 'sigma', 'y_offset'],
+        'label':       'Gaussian',
+        'defaults':    [1.0, 0.0, 1.0, 0.0],
+        'bounds_hint': (0.5, 1.5),
+        'latex':       r'$f(t) = A\,\exp\!\left[-\frac{(t-\mu)^2}{2\sigma^2}\right] + c$',
+        'symbols':     ['A', r'\mu', r'\sigma', 'c'],
+    },
+    'rising_exp': {
+        'func':        rising_exponential,
+        'params': ['amplitude', 'tau_rise', 'y_offset'],
+        'label':       'Rising Exponential',
+        'defaults':    [1.0, 1.0, 0.0],
+        'bounds_hint': (0.5, 1.5),
+        'latex':       r'$f(t) = A\,e^{\,t/\tau_r} + c$',
+        'symbols':     ['A', r'\tau_r', 'c'],
+    },
+    'decaying_exp': {
+        'func':        decaying_exponential,
+        'params':      ['amplitude', 'tau_decay', 'y_offset'],
+        'label':       'Decaying Exponential',
+        'defaults':    [1.0, 1.0, 0.0],
+        'bounds_hint': (0.5, 1.5),
+        'latex':       r'$f(t) = A\,e^{-t/\tau_d} + c$',
+        'symbols':     ['A', r'\tau_d', 'c'],
+    },
+    'crystal_ball': {
+        'func':        crystal_ball,
+        'params':      ['amplitude', 'centre', 'sigma', 'alpha', 'n', 'y_offset'],
+        'label':       'Crystal Ball',
+        'defaults':    [1.0, 0.0, 1.0, 1.0, 2.0, 0.0],
+        'bounds_hint': (0.5, 1.5),
+        'latex':       (r'$f(t) = A\,e^{-z^2/2} + c\ \ (z > -\alpha),'
+                        r'\quad z = \frac{t-\mu}{\sigma}$' '\n'
+                        r'$(\mathrm{power\ law,\ index\ } n,\ \mathrm{for}\ z < -\alpha)$'),
+        'symbols':     ['A', r'\mu', r'\sigma', r'\alpha', 'n', 'c'],
+    },
+    'bazin': {
+        'func':        bazin,
+        'params':      ['amplitude', 't0', 'tau_rise', 'tau_fall', 'y_offset'],
+        'label':       'Bazin (rise-peak-fall)',
+        'defaults':    [1.0, 0.0, 1.0, 1.0, 0.0],
+        'bounds_hint': (0.5, 1.5),
+        'latex':       r'$f(t) = A\,\frac{e^{-(t-t_0)/\tau_f}}{1 + e^{-(t-t_0)/\tau_r}} + c$',
+        'symbols':     ['A', 't_0', r'\tau_r', r'\tau_f', 'c'],
+    },
+    'gauss_exp_wings': {
+        'func':        gaussian_exp_wings,
+        'params':      ['amplitude', 'centre', 'sigma', 'tau_rise', 'tau_fall', 'y_offset'],
+        'label':       'Gaussian + Exp. wings',
+        'defaults':    [1.0, 0.0, 1.0, 1.0, 1.0, 0.0],
+        'bounds_hint': (0.5, 1.5),
+        'latex':       (r'$f(t) = A\,e^{-z^2/2} + c,\quad z = \frac{t-\mu}{\sigma}$' '\n'
+                        r'$(\mathrm{exp.\ rise}\ \tau_r\ \mathrm{for}\ z<-\sigma/\tau_r,\ '
+                        r'\mathrm{exp.\ decay}\ \tau_f\ \mathrm{for}\ z>\sigma/\tau_f)$'),
+        'symbols':     ['A', r'\mu', r'\sigma', r'\tau_r', r'\tau_f', 'c'],
+    },
 }
 
-# ---------------------------------------------------------------------------
-# Prior constants
-# ---------------------------------------------------------------------------
-
-PRIOR_FRACTION       = 0.30   # default ±30% uniform prior
-_Y_OFFSET_PRIOR_FRACTION = 0.10   # tighter ±10% for y_offset
-_PRIOR_ABS_FLOOR     = 1e-6   # minimum half-width to avoid zero-width priors
-
-# ---------------------------------------------------------------------------
-# Parameter name lists
-# ---------------------------------------------------------------------------
-
-_PARAM_NAMES = {
-    'gaussian':     ['amplitude', 'centre', 'sigma',        'y_offset'],
-    'rising_exp':   ['amplitude', 'tau_rise',               'y_offset'],
-    'decaying_exp': ['amplitude', 'tau_decay',              'y_offset'],
-    'crystal_ball': ['amplitude', 'centre', 'sigma', 'alpha', 'n', 'y_offset'],
-}
+# Convenience tuple for UI menus / radio buttons
+MODEL_KEYS   = list(MODELS.keys())
+MODEL_LABELS = [MODELS[k]['label'] for k in MODEL_KEYS]
 
 
 def param_names_for(model_key):
-    """Return the ordered list of parameter names for the given model."""
+    """Return the ordered list of parameter names for *model_key*."""
     try:
-        return list(_PARAM_NAMES[model_key])
+        return list(MODELS[model_key]['params'])
     except KeyError:
         raise ValueError(f"Unknown model key: '{model_key}'.  "
                          f"Valid keys: {MODEL_KEYS}")
 
 
 # ---------------------------------------------------------------------------
-# Model functions
-# ---------------------------------------------------------------------------
-
-def _gaussian(t, params):
-    A   = params['amplitude']
-    mu  = params['centre']
-    sig = params['sigma']
-    off = params['y_offset']
-    return A * np.exp(-0.5 * ((t - mu) / sig) ** 2) + off
-
-
-def _rising_exp(t, params):
-    A   = params['amplitude']
-    tau = params['tau_rise']
-    off = params['y_offset']
-    return A * np.exp(t / tau) + off
-
-
-def _decaying_exp(t, params):
-    A   = params['amplitude']
-    tau = params['tau_decay']
-    off = params['y_offset']
-    return A * np.exp(-t / tau) + off
-
-
-def _crystal_ball(t, params):
-    A     = params['amplitude']
-    mu    = params['centre']
-    sig   = params['sigma']
-    alpha = params['alpha']
-    n     = params['n']
-    off   = params['y_offset']
-
-    z     = (t - mu) / sig
-    abs_a = abs(alpha)
-
-    # Gaussian side
-    gauss = np.exp(-0.5 * z ** 2)
-
-    # Power-law tail (activated where z < -abs_a for alpha>0)
-    C      = (n / abs_a) ** n * np.exp(-0.5 * abs_a ** 2)
-    D      = n / abs_a - abs_a
-    denom  = np.where(np.abs(D - z) < 1e-10, 1e-10, D - z)
-    power  = C / (denom ** n)
-
-    result = np.where(z > -abs_a, gauss, power)
-    return A * result + off
-
-
-_MODEL_FUNCS = {
-    'gaussian':     _gaussian,
-    'rising_exp':   _rising_exp,
-    'decaying_exp': _decaying_exp,
-    'crystal_ball': _crystal_ball,
-}
-
-# Callable wrappers for scipy.optimize.curve_fit  (positional args).
-# These are used only in initialiser.py.
-def _make_cf_wrapper(model_key):
-    names = _PARAM_NAMES[model_key]
-    func  = _MODEL_FUNCS[model_key]
-    def wrapper(t, *args):
-        params = dict(zip(names, args))
-        return func(t, params)
-    wrapper.__name__ = model_key
-    return wrapper
-
-CURVE_FIT_FUNCS = {k: _make_cf_wrapper(k) for k in MODEL_KEYS}
-
-
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
-
-def evaluate(model_key, t, params):
-    """
-    Evaluate the named model at array t with the given params.
-
-    Parameters
-    ----------
-    model_key : str
-    t         : array-like   Region-relative time (t_shifted = t - region start).
-    params    : dict or list/array
-                If dict, keys must match param_names_for(model_key).
-                If list/array, values are matched positionally.
-
-    Returns
-    -------
-    np.ndarray
-    """
-    t = np.asarray(t, dtype=float)
-
-    if isinstance(params, dict):
-        p = params
-    else:
-        p = dict(zip(_PARAM_NAMES[model_key], params))
-
-    try:
-        return _MODEL_FUNCS[model_key](t, p)
-    except KeyError:
-        raise ValueError(f"Unknown model key: '{model_key}'")
-
-
-# ---------------------------------------------------------------------------
 # Prior construction
 # ---------------------------------------------------------------------------
 
-def build_priors(param_names, guesses,
-                 prior_fraction=PRIOR_FRACTION,
-                 fix_y_offset=False):
-    """
-    Build uniform priors from initial guesses.
+# Small absolute floor so that a guess of zero does not produce a zero-width prior.
+# Units are whatever the user's axes are, so this is intentionally tiny — it just prevents a degenerate prior, it is not physically meaningful.
 
-    Parameters
-    ----------
-    param_names   : list[str]
-    guesses       : list[float]   Same length and order as param_names.
-    prior_fraction: float         Half-width as a fraction of |guess|.
-    fix_y_offset  : bool          If True, y_offset is given a razor-thin
-                                  prior (±0.1% of the guess) so the sampler
-                                  effectively treats it as fixed.  Use this
-                                  to resolve Gaussian amplitude/offset
-                                  degeneracy when the region never returns
-                                  to baseline on both sides.
+_PRIOR_ABS_FLOOR = 1e-6
 
-    Returns
-    -------
-    dict  {param_name: {'lower': float, 'upper': float}}
+# Fraction above and below the initial guess that the prior should span.
+PRIOR_FRACTION = 0.30
+
+_Y_OFFSET_PRIOR_FRACTION = 0.10  # ±10% around the user's visual estimate — module level
+
+def build_priors(param_names, guesses, prior_fraction=PRIOR_FRACTION):
     """
+    Construct uniform prior bounds for each parameter given initial guesses.
+
+    For each parameter p_i with guess g_i:
+
+        lower_i = g_i - max(prior_fraction * |g_i|, _PRIOR_ABS_FLOOR)
+        upper_i = g_i + max(prior_fraction * |g_i|, _PRIOR_ABS_FLOOR)
+
+    y_offset uses _Y_OFFSET_PRIOR_FRACTION (±10%) regardless of prior_fraction,
+    to prevent the amplitude/y_offset degeneracy in Gaussian fits.
+    """
+
     if len(param_names) != len(guesses):
         raise ValueError(
-            f"param_names has {len(param_names)} entries but "
-            f"guesses has {len(guesses)}."
+            f"param_names has {len(param_names)} entries but guesses has "
+            f"{len(guesses)}."
         )
 
     priors = {}
     for name, g in zip(param_names, guesses):
-        if name == 'y_offset':
-            if fix_y_offset:
-                frac = 0.001          # effectively fixed — ±0.1%
-            else:
-                frac = _Y_OFFSET_PRIOR_FRACTION
-        else:
-            frac = prior_fraction
-
+        frac       = _Y_OFFSET_PRIOR_FRACTION if name == 'y_offset' else prior_fraction
         half_width = max(frac * abs(g), _PRIOR_ABS_FLOOR)
-        priors[name] = {'lower': g - half_width, 'upper': g + half_width}
-
+        priors[name] = {
+            'lower': g - half_width,
+            'upper': g + half_width,
+        }
     return priors
 
 
-def build_priors_from_curvefit(param_names, popt, pcov,
-                               n_sigma=2.0,
-                               fix_y_offset=False):
+def build_priors_from_curvefit(param_names, popt, pcov, n_sigma=2.0):
     """
-    Build priors from curve_fit results, with covariance-based widths.
+    Construct uniform prior bounds from a curve_fit result.
 
-    Covariance-derived widths are used only when they are finite and not more
-    than 10× the flat-prior fallback; otherwise the flat rule is used.
-    y_offset always uses the flat rule (covariance is unreliable for offsets
-    due to amplitude/y_offset anti-correlation).
+    For y_offset: always uses the flat ±10% rule around the fitted value,
+    ignoring the covariance — the covariance on y_offset is unreliable when
+    amplitude and offset are anti-correlated (Gaussian fits).
 
-    Parameters
-    ----------
-    param_names  : list[str]
-    popt         : array-like    curve_fit optimal parameters
-    pcov         : 2-D array     curve_fit covariance matrix
-    n_sigma      : float         prior half-width = n_sigma * std
-    fix_y_offset : bool          Same meaning as in build_priors().
-
-    Returns
-    -------
-    dict  {param_name: {'lower': float, 'upper': float}}
+    For all other parameters: uses n_sigma * std from the covariance, but
+    falls back to flat ±30% if the covariance-derived width exceeds 10x the
+    flat fallback (ill-conditioned fit).
     """
+
     stds   = np.sqrt(np.diag(pcov))
     priors = {}
-
     for name, g, s in zip(param_names, popt, stds):
+
         if name == 'y_offset':
-            if fix_y_offset:
-                frac = 0.001
-            else:
-                frac = _Y_OFFSET_PRIOR_FRACTION
-            half_width = max(frac * abs(g), _PRIOR_ABS_FLOOR)
+            # Always use tight flat prior for offset — covariance unreliable
+            half_width = max(_Y_OFFSET_PRIOR_FRACTION * abs(g), _PRIOR_ABS_FLOOR)
         else:
-            half_width_fb  = max(PRIOR_FRACTION * abs(g), _PRIOR_ABS_FLOOR)
-            half_width_cf  = n_sigma * s
+            half_width_cf = n_sigma * s
+            half_width_fb = max(PRIOR_FRACTION * abs(g), _PRIOR_ABS_FLOOR)
+            # Use CF width only if it's well-conditioned
             if np.isfinite(s) and s > 0 and half_width_cf <= 10.0 * half_width_fb:
                 half_width = half_width_cf
             else:
                 half_width = half_width_fb
 
-        priors[name] = {'lower': g - half_width, 'upper': g + half_width}
-
+        priors[name] = {
+            'lower': g - half_width,
+            'upper': g + half_width,
+        }
     return priors
+# ---------------------------------------------------------------------------
+# Convenience: evaluate a named model
+# ---------------------------------------------------------------------------
+
+def evaluate(model_key, t, params):
+
+    """
+    Evaluate a model at times t given a parameter list or dict.
+
+    Parameters
+    ----------
+    model_key : str         Key into MODELS (e.g. 'gaussian').
+    t         : array-like  Time values.
+    params    : list or dict
+
+        If list => must be in the same order as MODELS[model_key]['params'].
+        If dict => keys must match parameter names.
+
+    Returns
+    -------
+    flux : np.ndarray
+    """
+
+    if model_key not in MODELS:
+        raise KeyError(
+            f"Unknown model '{model_key}'. "
+            f"Available: {list(MODELS.keys())}"
+        )
+    func        = MODELS[model_key]['func']
+    param_names = MODELS[model_key]['params']
+
+    if isinstance(params, dict):
+        param_list = [params[n] for n in param_names]
+    else:
+        param_list = list(params)
+
+    return func(np.asarray(t), *param_list)

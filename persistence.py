@@ -252,7 +252,7 @@ class RegionStore:
         """
 
         before = len(self.regions)
-        self.regions = [r for r in self.regions if r['segment_id'] != segment_id]
+        self.regions[:] = [r for r in self.regions if r['segment_id'] != segment_id]
         if len(self.regions) == before:
             raise KeyError(f"No region with segment_id={segment_id}")
         self.save()
