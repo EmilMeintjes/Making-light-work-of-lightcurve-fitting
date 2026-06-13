@@ -57,7 +57,7 @@ import numpy as np
 # local imports
 from selector    import run_selector
 from initialiser import run_initialiser
-from fitter      import run_fitter
+from fitter      import run_fitter, run_fitter_gui
 from plots       import plot_all
 
 
@@ -152,7 +152,8 @@ def stage_init(t, flux, unc, args):
 def stage_fit(t, flux, unc, args):
     print("\n=== Stage 3: MCMC fitting ===")
     ids = args.ids if args.ids else None
-    summaries = run_fitter(
+    fit_fn = run_fitter if args.no_gui else run_fitter_gui
+    summaries = fit_fn(
         t, flux, uncertainty=unc,
         regions_file=args.regions,
         results_dir=args.results,
@@ -216,6 +217,9 @@ def parse_args():
     p.add_argument('--force',   action='store_true', default=False,
                    help='Delete stale PyAutoFit directories before fitting '
                         '(use to recover from crashed runs).')
+    p.add_argument('--no-gui',  action='store_true', default=False,
+                   help='During the fit stage, print progress to the '
+                        'terminal instead of opening progress/log windows.')
     p.add_argument('--xscale', default='linear', choices=['linear', 'log'],
                    help='X-axis scale (default: linear). Stored in regions JSON.')
     p.add_argument('--yscale', default='linear', choices=['linear', 'log'],

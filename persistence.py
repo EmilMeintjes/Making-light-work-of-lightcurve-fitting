@@ -252,7 +252,7 @@ class RegionStore:
         """
 
         before = len(self.regions)
-        self.regions = [r for r in self.regions if r['segment_id'] != segment_id]
+        self.regions[:] = [r for r in self.regions if r['segment_id'] != segment_id]
         if len(self.regions) == before:
             raise KeyError(f"No region with segment_id={segment_id}")
         self.save()
@@ -270,7 +270,8 @@ class RegionStore:
         self.save()
         return removed
 
-    def update_guesses(self, segment_id, guesses, priors=None, curvefit_result=None):
+    def update_guesses(self, segment_id, guesses, priors=None,
+                       curvefit_result=None, fix_y_offset=False):
 
         """
         Store initial parameter guesses (and optionally priors / curve_fit
@@ -283,10 +284,15 @@ class RegionStore:
             {param_name: {'lower': float, 'upper': float}}
         curvefit_result : dict or None
             {'popt': list, 'pcov': list-of-lists, 'success': bool}
+        fix_y_offset    : bool
+            If True, y_offset is pinned to its slider value during MCMC
+            (removed from the search entirely) to break the amplitude/offset
+            degeneracy.  Default False.
         """
 
         r = self.get(segment_id)
         r['initial_guesses'] = guesses
+        r['fix_y_offset']    = bool(fix_y_offset)
         if priors is not None:
             r['priors'] = priors
         if curvefit_result is not None:
