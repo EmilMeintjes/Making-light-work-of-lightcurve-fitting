@@ -384,6 +384,28 @@ def _run_one(t_r, f_r, u_r, region, store, xlabel, ylabel, xscale='linear', ysca
     ax_skip = fig.add_axes([x_btn,              btn_y, _BTN_W, _BTN_H])
     btn_skip = mwidgets.Button(ax_skip, 'Skip',
                                color='lightgrey', hovercolor='silver')
+    x_btn   += _BTN_W + 0.025/3.75
+
+    # "Fix y_offset" checkbox — pins y_offset at its slider value during MCMC,
+    # removing it from the search to break the amplitude/offset degeneracy.
+    # Only shown when the model actually has a y_offset parameter.
+    _has_y_offset = 'y_offset' in param_names
+    ax_fix = fig.add_axes([x_btn, btn_y, _BTN_W, _BTN_H])
+    chk_fix = mwidgets.CheckButtons(ax_fix, ['Fix y_offset?'], [False])
+    ax_fix.set_visible(_has_y_offset)
+    ax_fix.set_visible(_has_y_offset)
+    print("patches:", ax_fix.patches)
+    print("lines:", ax_fix.lines)
+    print(dir(chk_fix))
+
+    # Scale up the checkbox box and cross lines for legibility.
+    # matplotlib >= 3.7 removed .rectangles and .lines from CheckButtons;
+    # the patches and lines now live directly on ax_fix.
+    for patch in ax_fix.patches:
+        patch.set_width(patch.get_width() * 1.4)
+        patch.set_height(patch.get_height() * 1.4)
+    for line in ax_fix.lines:
+        line.set_linewidth(2.5)
 
     # Status text in plot
     status = ax_plot.text(
@@ -699,12 +721,15 @@ def _run_one(t_r, f_r, u_r, region, store, xlabel, ylabel, xscale='linear', ysca
             priors    = build_priors(param_names, list(guesses.values()))
             cf_result = None
 
+        fix_y = _has_y_offset and chk_fix.get_status()[0]
+
         try:
             store.update_guesses(
                 region['segment_id'],
                 guesses=guesses,
                 priors=priors,
                 curvefit_result=cf_result,
+                fix_y_offset=fix_y,
             )
         except Exception as exc:
             show_error(fig, 'Could not save region', str(exc))

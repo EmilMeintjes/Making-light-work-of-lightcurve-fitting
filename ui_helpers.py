@@ -305,7 +305,7 @@ class ToggleButton:
     enabled         : bool   Initial state.
     """
 
-    def __init__(self, ax, label, color='lightgrey', hovercolor='silver',
+    def __init__(self, ax, label, color='lightgrey', hovercolor='gray35',
                  disabled_color='whitesmoke', enabled=True):
         self.button = mwidgets.Button(ax, label, color=color, hovercolor=hovercolor)
         self._enabled_color  = color

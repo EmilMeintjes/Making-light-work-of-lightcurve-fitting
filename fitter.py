@@ -311,11 +311,12 @@ def _fit_one_region(t_r, f_r, u_r, region, results_dir,
             "Install it with:  pip install pyautofit emcee"
         )
 
-    sid         = region['segment_id']
-    model_key   = region['model']
-    param_names = MODELS[model_key]['params']
-    guesses     = region.get('initial_guesses', {})
-    priors_dict = region.get('priors', {})
+    sid            = region['segment_id']
+    model_key      = region['model']
+    param_names    = MODELS[model_key]['params']
+    guesses        = region.get('initial_guesses', {})
+    priors_dict    = region.get('priors', {})
+    fix_y_offset   = region.get('fix_y_offset', False)
 
     if not guesses:
         _log(progress, f"  Region #{sid}: no initial guesses — skipping.  "
@@ -349,10 +350,20 @@ def _fit_one_region(t_r, f_r, u_r, region, results_dir,
     os.makedirs(paf_path, exist_ok=True)
 
     # --- Build PyAutoFit model ---
-    af_priors = _build_af_priors(param_names, priors_dict)
-
-    # Create a model from _ParameterSet with one prior per attribute
-    model = af.Model(_ParameterSet, **af_priors)
+    # If fix_y_offset is set, exclude y_offset from the prior dict entirely
+    # and pin it on the model after construction.  This removes it from the
+    # MCMC search space, breaking the amplitude/offset degeneracy for
+    # Gaussian-type models on regions that haven't returned to baseline.
+    if fix_y_offset and 'y_offset' in param_names:
+        free_params = [p for p in param_names if p != 'y_offset']
+        af_priors   = _build_af_priors(free_params, priors_dict)
+        model       = af.Model(_ParameterSet, **af_priors)
+        model.y_offset = float(guesses.get('y_offset', 0.0))
+        _log(progress, f"  y_offset fixed at {model.y_offset:.6g} "
+                       f"(removed from MCMC search).")
+    else:
+        af_priors = _build_af_priors(param_names, priors_dict)
+        model     = af.Model(_ParameterSet, **af_priors)
 
     # --- Analysis ---
     analysis = _Analysis(t_r, f_r, u_r, model_key, param_names)

@@ -284,6 +284,15 @@ MODEL_KEYS   = list(MODELS.keys())
 MODEL_LABELS = [MODELS[k]['label'] for k in MODEL_KEYS]
 
 
+def param_names_for(model_key):
+    """Return the ordered list of parameter names for *model_key*."""
+    try:
+        return list(MODELS[model_key]['params'])
+    except KeyError:
+        raise ValueError(f"Unknown model key: '{model_key}'.  "
+                         f"Valid keys: {MODEL_KEYS}")
+
+
 # ---------------------------------------------------------------------------
 # Prior construction
 # ---------------------------------------------------------------------------
