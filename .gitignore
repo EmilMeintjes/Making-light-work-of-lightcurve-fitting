@@ -1,0 +1,31 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- macOS ----
+.DS_Store
+
+# ---- LaTeX: ship the compiled PDF, not the source/build files ----
+*.tex
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# ---- Pipeline-generated output / local state ----
+# Region selections and fit/plot outputs are produced by running the tool;
+# they are local to each user and should not be committed.
+regions*.json
+results/
+results_*/
+plots/
+plots_*/
+
+# PyAutoFit internal output directory
+**/pyautofit/
